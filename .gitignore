@@ -1,0 +1,14 @@
+# Python env/cache
+.venv/
+__pycache__/
+*.pyc
+
+# Runtime artifacts
+*.log
+.env
+.env.local
+.env.prod
+
+# OS/editor
+.DS_Store
+Thumbs.db
