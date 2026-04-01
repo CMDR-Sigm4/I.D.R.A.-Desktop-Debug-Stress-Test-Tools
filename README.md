@@ -13,7 +13,7 @@ This repository provides a standalone desktop simulator used by developers/opera
 - `idra_desktop_simulator.py` desktop simulator app
 - `requirements.txt` Python dependencies
 
-## Run without Docker (recommended)
+## Run
 1. `python3 -m venv .venv`
 2. `source .venv/bin/activate` (Windows: `.venv\\Scripts\\activate`)
 3. `pip install -r requirements.txt`
