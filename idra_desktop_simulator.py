@@ -58,6 +58,8 @@ class DesktopSimulatorApp:
         self.load_stop_token = 0
         self.fake_client_names: set[str] = set()
         self.created_channels: set[str] = set()
+        self.preview_window: Optional[tk.Toplevel] = None
+        self.preview_hide_job: Optional[str] = None
 
         self.server_url_var = tk.StringVar(value="http://localhost:3000")
         self.channel_var = tk.StringVar(value="global")
@@ -213,6 +215,12 @@ class DesktopSimulatorApp:
         ttk.Label(row2, text="System").pack(side=tk.LEFT)
         ttk.Entry(row2, textvariable=self.system_var, width=24).pack(side=tk.LEFT, padx=(6, 8))
         ttk.Button(row2, text="Send report", command=self.action_send_report).pack(side=tk.LEFT)
+
+        row3 = ttk.Frame(actions)
+        row3.pack(fill=tk.X, padx=6, pady=(0, 8))
+        ttk.Button(row3, text="Request context (network)", command=self.action_request_context).pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Button(row3, text="Show mock context (local)", command=self.action_show_mock_context).pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Button(row3, text="Show mock watchlist (local)", command=self.action_show_mock_watchlist).pack(side=tk.LEFT)
 
         auth = ttk.LabelFrame(right, text="Frontier OAuth (selected client)")
         auth.pack(fill=tk.X, pady=(0, 8))
@@ -452,6 +460,24 @@ class DesktopSimulatorApp:
         except Exception as exc:
             self._log(f"{client.name} disconnect error: {exc}")
 
+    def _emit_client(self, client: SimClient, event: str, payload: dict[str, Any]) -> bool:
+        """Safely emit one socket event for a client.
+
+        Returns True only when the emit was submitted to a connected namespace.
+        This prevents Tk callbacks from crashing on BadNamespaceError.
+        """
+        if not client.connected or not client.sio.connected:
+            self._log(f"{client.name} not connected: cannot emit {event}")
+            return False
+        try:
+            client.sio.emit(event, payload)
+            return True
+        except Exception as exc:
+            client.connected = False
+            self._refresh_clients_list()
+            self._log(f"{client.name} emit failed [{event}]: {exc}")
+            return False
+
     # ---------- selected actions ----------
 
     def action_join(self) -> None:
@@ -460,7 +486,8 @@ class DesktopSimulatorApp:
         if not client:
             self._log("No client selected")
             return
-        client.sio.emit(
+        self._emit_client(
+            client,
             "channel:join",
             {
                 "channel_name": self.channel_var.get().strip(),
@@ -475,7 +502,7 @@ class DesktopSimulatorApp:
         if not client:
             self._log("No client selected")
             return
-        client.sio.emit("channel:leave", {"channel_name": self.channel_var.get().strip()})
+        self._emit_client(client, "channel:leave", {"channel_name": self.channel_var.get().strip()})
 
     def action_list(self) -> None:
         """Emit `channel:list` for selected client."""
@@ -483,7 +510,7 @@ class DesktopSimulatorApp:
         if not client:
             self._log("No client selected")
             return
-        client.sio.emit("channel:list", {})
+        self._emit_client(client, "channel:list", {})
 
     def action_subs(self) -> None:
         """Emit `channel:subscriptions` for selected client."""
@@ -491,7 +518,7 @@ class DesktopSimulatorApp:
         if not client:
             self._log("No client selected")
             return
-        client.sio.emit("channel:subscriptions", {})
+        self._emit_client(client, "channel:subscriptions", {})
 
     def action_send_report(self) -> None:
         """Emit one randomized `report:create` event for selected client."""
@@ -502,7 +529,8 @@ class DesktopSimulatorApp:
         attacker = self.target_var.get().strip() or "TestGanker"
         system = self.system_var.get().strip() or "Sol"
         event_type = random.choice(EVENT_TYPES)
-        client.sio.emit(
+        if self._emit_client(
+            client,
             "report:create",
             {
                 "reporter_cmdr": client.name,
@@ -513,8 +541,103 @@ class DesktopSimulatorApp:
                 "event_type": event_type,
                 "event_time": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             },
+        ):
+            self._log(f"{client.name} report:create sent [{event_type}]")
+
+    def action_request_context(self) -> None:
+        """Request real system context from the server for selected client/system."""
+        client = self._selected_client()
+        if not client:
+            self._log("No client selected")
+            return
+        system = self.system_var.get().strip() or "Sol"
+        if self._emit_client(client, "system:context", {"system": system}):
+            self._log(f"{client.name} system:context requested [{system}]")
+
+    def action_show_mock_context(self) -> None:
+        """Render a local context preview window without network/plugin dependency."""
+        system = self.system_var.get().strip() or "Sol"
+        lines = [
+            ("System context", "#FFD166"),
+            (f"System: {system} | Risk: HIGH", "#FF6B6B"),
+            ("Reports 2h: 17 | Unique attackers 24h: 9", "#E6EDF3"),
+            ("Last activity: 2 min ago | Types: Player kill, Weapon attack", "#A9B4C0"),
+            ("Safe visitors: 1h 4 | 12h 27 | 24h 61 | 7d 402", "#55D17A"),
+        ]
+        self._show_overlay_preview(lines)
+        self._log("Mock context preview opened")
+
+    def action_show_mock_watchlist(self) -> None:
+        """Render a local watchlist preview window without network/plugin dependency."""
+        attacker = self.target_var.get().strip() or "TestGanker"
+        system = self.system_var.get().strip() or "Sol"
+        lines = [
+            ("Watchlist match", "#FFD166"),
+            (f"Attacker in watchlist: {attacker}", "#FFB347"),
+            ("Reported by: CMDR Ally", "#A9B4C0"),
+            (f"System: {system} | Type: Weapon attack", "#E6EDF3"),
+        ]
+        self._show_overlay_preview(lines)
+        self._log("Mock watchlist preview opened")
+
+    def _show_overlay_preview(self, lines: list[tuple[str, str]]) -> None:
+        """Show a transient themed preview window used for context/watchlist mocks."""
+        if self.preview_window and self.preview_window.winfo_exists():
+            win = self.preview_window
+            for child in win.winfo_children():
+                child.destroy()
+        else:
+            win = tk.Toplevel(self.root)
+            win.title("Overlay preview")
+            win.attributes("-topmost", True)
+            win.resizable(False, False)
+            self.preview_window = win
+
+        win.configure(background="#0f131b")
+        container = tk.Frame(
+            win,
+            background="#11161f",
+            highlightthickness=1,
+            highlightbackground="#2D3A4D",
+            highlightcolor="#2D3A4D",
+            padx=12,
+            pady=10,
         )
-        self._log(f"{client.name} report:create sent [{event_type}]")
+        container.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
+
+        for idx, (text, color) in enumerate(lines):
+            lbl = tk.Label(
+                container,
+                text=text,
+                anchor="w",
+                justify="left",
+                foreground=color,
+                background="#11161f",
+                font=("Segoe UI", 11),
+            )
+            lbl.grid(row=idx, column=0, sticky="w", pady=(0, 4 if idx < len(lines) - 1 else 0))
+
+        win.update_idletasks()
+        sw = int(win.winfo_screenwidth() or 1280)
+        ww = int(win.winfo_reqwidth() or 620)
+        x = max(8, (sw - ww) // 2)
+        y = 80
+        win.geometry(f"+{x}+{y}")
+        win.lift()
+
+        if self.preview_hide_job:
+            try:
+                self.root.after_cancel(self.preview_hide_job)
+            except Exception:
+                pass
+        self.preview_hide_job = self.root.after(5000, self._hide_overlay_preview)
+
+    def _hide_overlay_preview(self) -> None:
+        """Hide preview overlay if currently visible."""
+        self.preview_hide_job = None
+        if self.preview_window and self.preview_window.winfo_exists():
+            self.preview_window.destroy()
+        self.preview_window = None
 
     # ---------- auth ----------
 
@@ -529,7 +652,8 @@ class DesktopSimulatorApp:
             return
         verifier, challenge = generate_pkce()
         client.code_verifier = verifier
-        client.sio.emit(
+        self._emit_client(
+            client,
             "auth:start",
             {
                 "code_challenge": challenge,
@@ -559,7 +683,7 @@ class DesktopSimulatorApp:
             "code_verifier": client.code_verifier,
             "state": callback_state or client.flow_state,
         }
-        client.sio.emit("auth:complete", payload)
+        self._emit_client(client, "auth:complete", payload)
 
     def action_auth_status(self) -> None:
         """Request latest authentication status for selected client."""
@@ -567,7 +691,7 @@ class DesktopSimulatorApp:
         if not client:
             self._log("No client selected")
             return
-        client.sio.emit("auth:status", {})
+        self._emit_client(client, "auth:status", {})
 
     # ---------- load ----------
 
@@ -606,14 +730,14 @@ class DesktopSimulatorApp:
                     self._remove_client(name)
                     continue
                 if self.use_test_login_for_bots_var.get():
-                    c.sio.emit("auth:test_login", {"cmdr": name, "frontier_account_id": f"acct-{name}"})
+                    self._emit_client(c, "auth:test_login", {"cmdr": name, "frontier_account_id": f"acct-{name}"})
                     authed = self._wait_for(lambda: c.authenticated, timeout=5.0)
                     if not authed:
                         failed += 1
                         self._remove_client(name)
                         continue
                 if c.authenticated:
-                    c.sio.emit("channel:join", {"channel_name": ch, "public_on_create": True, "password": ""})
+                    self._emit_client(c, "channel:join", {"channel_name": ch, "public_on_create": True, "password": ""})
                     success += 1
                 else:
                     # If test-login is disabled, keep connected fake user but mark it as not blast-eligible.
@@ -641,7 +765,8 @@ class DesktopSimulatorApp:
             if not c.connected:
                 continue
             event_type = random.choice(EVENT_TYPES)
-            c.sio.emit(
+            if self._emit_client(
+                c,
                 "report:create",
                 {
                     "reporter_cmdr": c.name,
@@ -652,12 +777,12 @@ class DesktopSimulatorApp:
                     "event_type": event_type,
                     "event_time": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                 },
-            )
-            sent += 1
-            if c.authenticated:
-                sent_auth += 1
-            else:
-                sent_unauth += 1
+            ):
+                sent += 1
+                if c.authenticated:
+                    sent_auth += 1
+                else:
+                    sent_unauth += 1
         self._log(f"Blast sent from {sent} connected clients (auth: {sent_auth}, unauth: {sent_unauth})")
 
     def cleanup_fake_users(self) -> None:
